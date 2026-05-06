@@ -1,0 +1,14 @@
+bsa_conflict_viewer/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+modorganizer/
+modorganizer-archive/
+modorganizer-bsa_conflict_viewer/
+modorganizer-bsa_extractor/
+modorganizer-bsatk/
+modorganizer-python_plugins/
+modorganizer-uibase/
+
