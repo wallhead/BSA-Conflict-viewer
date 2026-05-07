@@ -52,6 +52,7 @@ class Provider:
     archive_name: str
     real_archive_path: str
     order: int
+    archive_order: int = 0
     size: int = 0
 
     def label(self) -> str:
@@ -97,6 +98,7 @@ class ArchiveListing:
     archive_name: str
     display_mod_name: str
     real_archive_path: str
+    archive_order: int
     files: List[str]
 
 
@@ -111,6 +113,7 @@ class ScanResult:
 class ModArchiveSummary:
     mod_name: str
     display_mod_name: str
+    load_order: int
     archives: List[ArchiveListing]
     files: List[str]
 
@@ -150,10 +153,12 @@ class BsaConflictDialog(QDialog):
         super().__init__(parent)
         self._plugin = plugin
         self._conflicts: List[Conflict] = []
+        self._conflict_by_path: Dict[str, Conflict] = {}
         self._archives: List[ArchiveListing] = []
         self._mod_summaries: List[ModArchiveSummary] = []
         self._warnings: List[str] = []
         self._category_checks: Dict[str, QCheckBox] = {}
+        self._last_detail_table: Optional[QTableWidget] = None
         self._populate_timer = QTimer(self)
         self._populate_timer.setSingleShot(True)
         self._populate_timer.setInterval(300)
@@ -179,6 +184,7 @@ class BsaConflictDialog(QDialog):
 
         search_layout.addWidget(QLabel("Sort:", self))
         self._mod_sort = QComboBox(self)
+        self._mod_sort.addItem("Load order", "load_order")
         self._mod_sort.addItem("Alphabetic", "alphabetic")
         self._mod_sort.addItem("File quantity", "files")
         self._mod_sort.currentIndexChanged.connect(self.populate)
@@ -237,6 +243,15 @@ class BsaConflictDialog(QDialog):
         self._no_conflict_section.addWidget(self._no_conflict_table)
         details.addWidget(self._no_conflict_header)
         details.addLayout(self._no_conflict_section)
+        self._detail_tables = (
+            self._winning_table,
+            self._losing_table,
+            self._no_conflict_table,
+        )
+        for table in self._detail_tables:
+            table.itemSelectionChanged.connect(
+                lambda table=table: self._remember_detail_table(table)
+            )
 
         splitter.addWidget(details_widget)
         splitter.setStretchFactor(0, 0)
@@ -300,6 +315,10 @@ class BsaConflictDialog(QDialog):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
         return table
 
+    def _remember_detail_table(self, table: QTableWidget) -> None:
+        if table.selectionModel().hasSelection():
+            self._last_detail_table = table
+
     def refresh(self) -> None:
         progress = QProgressDialog("Preparing BSA conflict scan...", "Cancel", 0, 0, self)
         progress.setWindowTitle("BSA Conflict Viewer")
@@ -325,6 +344,7 @@ class BsaConflictDialog(QDialog):
         try:
             result = self._plugin.scan(update_progress)
             self._conflicts = result.conflicts
+            self._conflict_by_path = {conflict.path: conflict for conflict in self._conflicts}
             self._archives = result.archives
             self._warnings = result.warnings
             self._mod_summaries = self._build_mod_summaries()
@@ -403,7 +423,8 @@ class BsaConflictDialog(QDialog):
                     next_selection_item = item
 
                 for archive in sorted(
-                    summary.archives, key=lambda archive: archive.archive_name.lower()
+                    summary.archives,
+                    key=lambda archive: (archive.archive_order, archive.archive_name.lower()),
                 ):
                     archive_file_count = self._visible_file_count(
                         archive.files, enabled_categories, file_filter
@@ -481,9 +502,10 @@ class BsaConflictDialog(QDialog):
         for mod_name, archives in by_mod.items():
             files = sorted({path for archive in archives for path in archive.files})
             display = archives[0].display_mod_name if archives else mod_name
-            summaries.append(ModArchiveSummary(mod_name, display, archives, files))
+            load_order = self._plugin._origin_conflict_order(mod_name)
+            summaries.append(ModArchiveSummary(mod_name, display, load_order, archives, files))
 
-        summaries.sort(key=lambda summary: summary.display_mod_name.lower())
+        summaries.sort(key=lambda summary: (summary.load_order, summary.display_mod_name.lower()))
         return summaries
 
     def _summary_matches_filters(
@@ -518,6 +540,13 @@ class BsaConflictDialog(QDialog):
             summaries.sort(
                 key=lambda summary: (
                     -self._visible_file_count(summary.files, enabled_categories, file_filter),
+                    summary.display_mod_name.lower(),
+                )
+            )
+        elif sort_mode == "load_order":
+            summaries.sort(
+                key=lambda summary: (
+                    summary.load_order,
                     summary.display_mod_name.lower(),
                 )
             )
@@ -558,10 +587,13 @@ class BsaConflictDialog(QDialog):
         }
         conflict_paths = set()
         winning_rows = []
+        winning_tooltips = []
         losing_rows = []
+        losing_tooltips = []
 
-        for conflict in self._conflicts:
-            if conflict.path not in selected_files:
+        for path in sorted(selected_files):
+            conflict = self._conflict_by_path.get(path)
+            if conflict is None:
                 continue
             selected_providers = [
                 provider
@@ -588,21 +620,22 @@ class BsaConflictDialog(QDialog):
                 winning_rows.append(
                     [conflict.path, ", ".join(overwritten) or "(same mod archives)"]
                 )
+                winning_tooltips.append(conflict.chain_label())
             else:
                 losing_rows.append([conflict.path, conflict.winner.label()])
+                losing_tooltips.append(conflict.chain_label())
 
         no_conflict_rows = [[path] for path in sorted(selected_files - conflict_paths)]
-        winning_rows.sort(key=lambda row: row[0])
-        losing_rows.sort(key=lambda row: row[0])
+        no_conflict_tooltips = [row[0] for row in no_conflict_rows]
 
         self._winning_header.setText(f"Winning file conflicts: {len(winning_rows)}")
         self._losing_header.setText(f"Losing file conflicts: {len(losing_rows)}")
         self._no_conflict_header.setText(
             f"Files without conflicts: {len(no_conflict_rows)}"
         )
-        self._set_table_rows(self._winning_table, winning_rows)
-        self._set_table_rows(self._losing_table, losing_rows)
-        self._set_table_rows(self._no_conflict_table, no_conflict_rows)
+        self._set_table_rows(self._winning_table, winning_rows, winning_tooltips)
+        self._set_table_rows(self._losing_table, losing_rows, losing_tooltips)
+        self._set_table_rows(self._no_conflict_table, no_conflict_rows, no_conflict_tooltips)
 
     @staticmethod
     def _format_size(size: int) -> str:
@@ -615,14 +648,19 @@ class BsaConflictDialog(QDialog):
             value /= 1024
         return f"{int(size)} B"
 
-    def _set_table_rows(self, table: QTableWidget, rows: List[List[str]]) -> None:
+    def _set_table_rows(
+        self,
+        table: QTableWidget,
+        rows: List[List[str]],
+        tooltips: Optional[List[str]] = None,
+    ) -> None:
         table.setUpdatesEnabled(False)
         table.setSortingEnabled(False)
         table.clearContents()
         table.setRowCount(len(rows))
         try:
             for row_index, row in enumerate(rows):
-                tooltip = " | ".join(row)
+                tooltip = tooltips[row_index] if tooltips is not None else " | ".join(row)
                 for column, value in enumerate(row):
                     item = QTableWidgetItem(value)
                     item.setToolTip(tooltip)
@@ -700,12 +738,19 @@ class BsaConflictDialog(QDialog):
 
     def _selected_detail_table(self) -> Optional[QTableWidget]:
         focus = QApplication.focusWidget()
-        for table in (
-            self._winning_table,
-            self._losing_table,
-            self._no_conflict_table,
+        tables = getattr(self, "_detail_tables", ())
+        for table in tables:
+            if focus is not None and (
+                focus is table or focus is table.viewport() or table.isAncestorOf(focus)
+            ):
+                return table
+        if (
+            self._last_detail_table is not None
+            and self._last_detail_table.selectionModel().hasSelection()
         ):
-            if focus is table or table.selectionModel().hasSelection():
+            return self._last_detail_table
+        for table in tables:
+            if table.selectionModel().hasSelection():
                 return table
         return None
 
@@ -736,7 +781,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         return self._tr("Shows archive and loose-file overwrite chains without extraction.")
 
     def version(self) -> mobase.VersionInfo:
-        return mobase.VersionInfo(0, 1, 0, mobase.ReleaseType.PREALPHA)
+        return mobase.VersionInfo(1, 1, 0, mobase.ReleaseType.FINAL)
 
     def isActive(self) -> bool:
         return True
@@ -775,11 +820,12 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         if progress and not progress("Reading active archive list...", None, None):
             return ScanResult([], [], ["Scan canceled before archive list was read."])
         canceled = not self._collect_archives(providers, archives, warnings, progress)
+        archive_paths = set(providers)
         if not canceled:
             if progress and not progress("Scanning loose files...", None, None):
                 canceled = True
             else:
-                canceled = not self._collect_loose_files(providers, progress)
+                canceled = not self._collect_loose_files(providers, archive_paths, progress)
 
         if progress:
             progress("Building conflict chains...", None, None)
@@ -787,10 +833,12 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         for path, chain in providers.items():
             if len(chain) < 2:
                 continue
+            if not any(provider.kind == "archive" for provider in chain):
+                continue
 
             chain = sorted(
                 chain,
-                key=lambda provider: (0 if provider.kind == "archive" else 1, provider.order),
+                key=self._provider_sort_key,
             )
             conflicts.append(Conflict(path, chain))
 
@@ -798,6 +846,12 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         if canceled:
             warnings.append("Scan canceled. Showing partial results.")
         return ScanResult(conflicts, archives, warnings)
+
+    @staticmethod
+    def _provider_sort_key(provider: Provider) -> tuple[int, int, int]:
+        archive_order = provider.archive_order if provider.kind == "archive" else 2_000_000_000
+        tie_breaker = 1 if provider.kind == "loose" else 0
+        return (provider.order, archive_order, tie_breaker)
 
     def _collect_archives(
         self,
@@ -857,7 +911,8 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
                 display_mod_name=self._display_name_for_origin(origin),
                 archive_name=archive_name,
                 real_archive_path=str(archive_path),
-                order=order,
+                order=self._origin_conflict_order(origin),
+                archive_order=order,
             )
 
             archive_files = sorted(entry.path for entry in index.files)
@@ -867,6 +922,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
                     archive_name=archive_name,
                     display_mod_name=provider_base.display_mod_name,
                     real_archive_path=str(archive_path),
+                    archive_order=provider_base.archive_order,
                     files=archive_files,
                 )
             )
@@ -880,6 +936,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
                     archive_name=provider_base.archive_name,
                     real_archive_path=provider_base.real_archive_path,
                     order=provider_base.order,
+                    archive_order=provider_base.archive_order,
                     size=entry.size,
                 )
                 providers.setdefault(entry.path, []).append(provider)
@@ -958,8 +1015,11 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
     def _collect_loose_files(
         self,
         providers: Dict[str, List[Provider]],
+        archive_paths: set[str],
         progress: Optional[ProgressCallback] = None,
     ) -> bool:
+        if not archive_paths:
+            return True
         specs = self._loose_origin_specs()
         for index, (origin, root, order) in enumerate(specs):
             if progress and not progress(
@@ -968,7 +1028,9 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
                 len(specs),
             ):
                 return False
-            self._collect_loose_files_from_origin(origin, root, order, providers)
+            self._collect_loose_files_from_origin(
+                origin, root, order, providers, archive_paths
+            )
         return True
 
     def _loose_origin_specs(self) -> list[tuple[str, Path, int]]:
@@ -977,7 +1039,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
 
         data_root = self._origin_root_path("data")
         if data_root is not None and data_root.exists():
-            specs.append(("data", data_root, -1))
+            specs.append(("data", data_root, self._origin_conflict_order("data")))
             seen_roots.add(str(data_root).lower())
 
         for mod_name in self._organizer.modList().allModsByProfilePriority():
@@ -996,7 +1058,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
                 (
                     mod_name,
                     root,
-                    max(0, self._organizer.modList().priority(mod_name)),
+                    self._origin_conflict_order(mod_name),
                 )
             )
 
@@ -1004,10 +1066,20 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         if overwrite_root is not None and overwrite_root.exists():
             root_key = str(overwrite_root).lower()
             if root_key not in seen_roots:
-                specs.append(("overwrite", overwrite_root, 2_000_000_000))
+                specs.append(
+                    ("overwrite", overwrite_root, self._origin_conflict_order("overwrite"))
+                )
 
         specs.sort(key=lambda spec: spec[2])
         return specs
+
+    def _origin_conflict_order(self, origin: str) -> int:
+        lowered = origin.lower()
+        if lowered == "data":
+            return -1_000_000_000
+        if lowered == "overwrite":
+            return 2_000_000_000
+        return max(0, self._organizer.modList().priority(origin))
 
     def _collect_loose_files_from_origin(
         self,
@@ -1015,6 +1087,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         root: Path,
         order: int,
         providers: Dict[str, List[Provider]],
+        archive_paths: set[str],
     ) -> None:
         display_name = self._display_name_for_origin(origin)
         stack = [(str(root), "")]
@@ -1039,6 +1112,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
                         path = normalize_asset_path(relative_path)
                         if (
                             not path
+                            or path not in archive_paths
                             or self._is_archive_container(path)
                             or self._is_mod_metadata_file(path)
                         ):
