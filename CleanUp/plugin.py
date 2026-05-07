@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -154,12 +155,17 @@ class BsaConflictDialog(QDialog):
         self._mod_summaries: List[ModArchiveSummary] = []
         self._warnings: List[str] = []
         self._category_checks: Dict[str, QCheckBox] = {}
+        self._reclaimable_by_mod: Dict[str, int] = {}
+        self._total_reclaimable_bytes = 0
+        self._visible_reclaimable_bytes = 0
+        self._hidden_reclaimable_bytes = 0
+        self._cleanup_dirty = True
         self._populate_timer = QTimer(self)
         self._populate_timer.setSingleShot(True)
         self._populate_timer.setInterval(300)
         self._populate_timer.timeout.connect(self.populate)
 
-        self.setWindowTitle("BSA Conflict Viewer")
+        self.setWindowTitle("CleanUp")
         self.resize(1250, 760)
 
         layout = QVBoxLayout(self)
@@ -176,13 +182,6 @@ class BsaConflictDialog(QDialog):
         self._mod_filter.setPlaceholderText("Partial mod search")
         self._mod_filter.textChanged.connect(self._schedule_populate)
         search_layout.addWidget(self._mod_filter, 1)
-
-        search_layout.addWidget(QLabel("Sort:", self))
-        self._mod_sort = QComboBox(self)
-        self._mod_sort.addItem("Alphabetic", "alphabetic")
-        self._mod_sort.addItem("File quantity", "files")
-        self._mod_sort.currentIndexChanged.connect(self.populate)
-        search_layout.addWidget(self._mod_sort)
 
         search_layout.addWidget(QLabel("Files:", self))
         self._file_filter = QLineEdit(self)
@@ -201,7 +200,12 @@ class BsaConflictDialog(QDialog):
         category_layout.addStretch(1)
         layout.addLayout(category_layout)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self._tabs = QTabWidget(self)
+        conflicts_page = QWidget(self)
+        conflicts_layout = QVBoxLayout(conflicts_page)
+        conflicts_layout.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal, conflicts_page)
         self._mod_list = QTreeWidget(self)
         self._mod_list.setMinimumWidth(320)
         self._mod_list.setHeaderHidden(True)
@@ -213,6 +217,15 @@ class BsaConflictDialog(QDialog):
         details = QVBoxLayout()
         details_widget = QWidget(self)
         details_widget.setLayout(details)
+
+        self._space_summary = QLabel(self)
+        self._space_summary.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._space_summary.setToolTip(
+            self._cleanup_rule_text()
+        )
+        details.addWidget(self._space_summary)
 
         self._winning_header, self._winning_section = self._make_dropdown_section(
             "Winning file conflicts: 0"
@@ -241,7 +254,58 @@ class BsaConflictDialog(QDialog):
         splitter.addWidget(details_widget)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
+        conflicts_layout.addWidget(splitter)
+        self._tabs.addTab(conflicts_page, "Conflicts")
+
+        self._cleanup_page = QWidget(self)
+        cleanup_layout = QVBoxLayout(self._cleanup_page)
+        cleanup_layout.setContentsMargins(0, 0, 0, 0)
+        self._cleanup_summary = QLabel(self)
+        self._cleanup_summary.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._cleanup_summary.setToolTip(self._cleanup_rule_text())
+        cleanup_layout.addWidget(self._cleanup_summary)
+
+        cleanup_controls = QHBoxLayout()
+        cleanup_controls.addWidget(QLabel("Sort:", self))
+        self._cleanup_sort = QComboBox(self)
+        self._cleanup_sort.addItem("Alphabetic", "alphabetic")
+        self._cleanup_sort.addItem("Cleanup space", "cleanup")
+        self._cleanup_sort.addItem("File quantity", "files")
+        self._cleanup_sort.setCurrentIndex(1)
+        self._cleanup_sort.currentIndexChanged.connect(self.populate)
+        cleanup_controls.addWidget(self._cleanup_sort)
+
+        cleanup_controls.addWidget(QLabel("Type:", self))
+        self._cleanup_type = QComboBox(self)
+        self._cleanup_type.addItem("All", "all")
+        self._cleanup_type.addItem("BSA/BA2", "archive")
+        self._cleanup_type.addItem("Loose", "loose")
+        self._cleanup_type.currentIndexChanged.connect(self.populate)
+        cleanup_controls.addWidget(self._cleanup_type)
+
+        cleanup_controls.addStretch(1)
+        cleanup_layout.addLayout(cleanup_controls)
+
+        self._cleanup_tree = QTreeWidget(self)
+        self._cleanup_tree.setColumnCount(6)
+        self._cleanup_tree.setHeaderLabels(
+            ["Mod / File", "Size", "Type", "Source", "Overwritten", "Winner"]
+        )
+        self._cleanup_tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._cleanup_tree.setSortingEnabled(False)
+        self._cleanup_tree.setUniformRowHeights(True)
+        cleanup_header = self._cleanup_tree.header()
+        cleanup_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 6):
+            cleanup_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        cleanup_layout.addWidget(self._cleanup_tree, 1)
+        self._tabs.addTab(self._cleanup_page, "Cleanup")
+        self._tabs.removeTab(0)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+        layout.addWidget(self._tabs, 1)
 
         buttons = QDialogButtonBox(self)
         scan_button = buttons.addButton("Scan", QDialogButtonBox.ButtonRole.ActionRole)
@@ -302,7 +366,7 @@ class BsaConflictDialog(QDialog):
 
     def refresh(self) -> None:
         progress = QProgressDialog("Preparing BSA conflict scan...", "Cancel", 0, 0, self)
-        progress.setWindowTitle("BSA Conflict Viewer")
+        progress.setWindowTitle("CleanUp")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setFixedWidth(560)
@@ -328,6 +392,7 @@ class BsaConflictDialog(QDialog):
             self._archives = result.archives
             self._warnings = result.warnings
             self._mod_summaries = self._build_mod_summaries()
+            self._total_reclaimable_bytes = self._total_cleanup_bytes()
         finally:
             QApplication.restoreOverrideCursor()
             progress.close()
@@ -356,6 +421,20 @@ class BsaConflictDialog(QDialog):
 
         mod_filter = self._filter_text(self._mod_filter)
         file_filter = self._filter_text(self._file_filter)
+        self._summary.setText(
+            f"{len(self._conflicts)} conflict paths, "
+            f"{len(self._archives)} archives. "
+            f"{len(self._warnings)} warnings."
+        )
+        tooltip_lines = [
+            self._cleanup_rule_text(),
+            "Cleanup counts losing providers before the final winner.",
+        ]
+        tooltip_lines.extend(self._warnings)
+        self._summary.setToolTip("\n".join(tooltip_lines))
+        self._populate_cleanup_page(enabled_categories, mod_filter, file_filter)
+        return
+
         visible_mods = [
             summary
             for summary in self._mod_summaries
@@ -363,7 +442,18 @@ class BsaConflictDialog(QDialog):
                 summary, enabled_categories, mod_filter, file_filter
             )
         ]
+        self._reclaimable_by_mod = self._reclaimable_bytes_by_mod(
+            enabled_categories, file_filter
+        )
         self._sort_mod_summaries(visible_mods, enabled_categories, file_filter)
+        self._visible_reclaimable_bytes = sum(
+            self._reclaimable_by_mod.get(summary.mod_name, 0)
+            for summary in visible_mods
+        )
+        filtered_reclaimable = sum(self._reclaimable_by_mod.values())
+        self._hidden_reclaimable_bytes = max(
+            0, filtered_reclaimable - self._visible_reclaimable_bytes
+        )
         visible_archive_files = sum(
             self._visible_file_count(summary.files, enabled_categories, file_filter)
             for summary in visible_mods
@@ -371,9 +461,19 @@ class BsaConflictDialog(QDialog):
         self._summary.setText(
             f"{len(visible_mods)} BSA mods, "
             f"{len(self._archives)} archives, {visible_archive_files} visible files. "
+            f"Cleanup: {self._format_size(self._visible_reclaimable_bytes)} shown, "
+            f"{self._format_size(self._hidden_reclaimable_bytes)} not shown, "
+            f"{self._format_size(self._total_reclaimable_bytes)} total. "
             f"{len(self._warnings)} warnings."
         )
-        self._summary.setToolTip("\n".join(self._warnings))
+        tooltip_lines = [
+            self._cleanup_rule_text(),
+            "shown = cleanup from BSA mods currently listed in the left tree",
+            "not shown = cleanup from enabled loose-only mods, Data, Overwrite, or filtered-out mods",
+            "total = whole scan without current filters",
+        ]
+        tooltip_lines.extend(self._warnings)
+        self._summary.setToolTip("\n".join(tooltip_lines))
 
         self._mod_list.setUpdatesEnabled(False)
         previous_signal_state = self._mod_list.blockSignals(True)
@@ -389,7 +489,8 @@ class BsaConflictDialog(QDialog):
                     [
                         (
                             f"{summary.display_mod_name} "
-                            f"({len(summary.archives)} BSA, {visible_file_count} files)"
+                            f"({len(summary.archives)} BSA, {visible_file_count} files, "
+                            f"free {self._format_size(self._reclaimable_by_mod.get(summary.mod_name, 0))})"
                         )
                     ]
                 )
@@ -437,6 +538,9 @@ class BsaConflictDialog(QDialog):
             self._mod_list.setCurrentItem(next_selection_item or first_item)
         else:
             self._populate_mod_details(None, None)
+        self._cleanup_dirty = True
+        if self._tabs.currentWidget() is self._cleanup_page:
+            self._populate_cleanup_page(enabled_categories, mod_filter, file_filter)
 
     def _on_selected_mod_changed(self, *_args) -> None:
         current = self._mod_list.currentItem()
@@ -448,6 +552,14 @@ class BsaConflictDialog(QDialog):
     def _on_mod_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         if item.parent() is None:
             item.setExpanded(True)
+
+    def _on_tab_changed(self, _index: int) -> None:
+        if self._tabs.currentWidget() is self._cleanup_page and self._cleanup_dirty:
+            self._populate_cleanup_page(
+                self._enabled_categories(),
+                self._filter_text(self._mod_filter),
+                self._filter_text(self._file_filter),
+            )
 
     def _selected_summary(self) -> Optional[ModArchiveSummary]:
         summary, _archive = self._selected_scope()
@@ -514,7 +626,14 @@ class BsaConflictDialog(QDialog):
         file_filter: str,
     ) -> None:
         sort_mode = self._mod_sort.currentData() if hasattr(self, "_mod_sort") else "alphabetic"
-        if sort_mode == "files":
+        if sort_mode == "cleanup":
+            summaries.sort(
+                key=lambda summary: (
+                    -self._reclaimable_by_mod.get(summary.mod_name, 0),
+                    summary.display_mod_name.lower(),
+                )
+            )
+        elif sort_mode == "files":
             summaries.sort(
                 key=lambda summary: (
                     -self._visible_file_count(summary.files, enabled_categories, file_filter),
@@ -535,6 +654,127 @@ class BsaConflictDialog(QDialog):
             and (not file_filter or file_filter in path.lower())
         )
 
+    def _populate_cleanup_page(
+        self, enabled_categories: set[str], mod_filter: str, file_filter: str
+    ) -> None:
+        cleanup_by_mod: Dict[str, dict] = {}
+        cleanup_type = (
+            self._cleanup_type.currentData()
+            if hasattr(self, "_cleanup_type")
+            else "all"
+        )
+        for conflict in self._conflicts:
+            if category_for_path(conflict.path) not in enabled_categories:
+                continue
+            if file_filter and file_filter not in conflict.path.lower():
+                continue
+
+            for provider_index, provider in enumerate(conflict.chain[:-1]):
+                if provider.size <= 0:
+                    continue
+                if cleanup_type != "all" and provider.kind != cleanup_type:
+                    continue
+                if not self._cleanup_provider_matches_mod_filter(provider, mod_filter):
+                    continue
+
+                entry = cleanup_by_mod.setdefault(
+                    provider.mod_name,
+                    {
+                        "display": provider.display_mod_name,
+                        "total": 0,
+                        "rows": [],
+                    },
+                )
+                entry["total"] += provider.size
+                entry["rows"].append(
+                    (
+                        conflict.path,
+                        provider.size,
+                        provider.kind_label(),
+                        provider.archive_name if provider.kind == "archive" else "(loose)",
+                        len(conflict.chain) - provider_index - 1,
+                        conflict.winner.label(),
+                        conflict.chain_label(),
+                    )
+                )
+
+        sorted_entries = self._sorted_cleanup_entries(list(cleanup_by_mod.values()))
+        total_files = sum(len(entry["rows"]) for entry in sorted_entries)
+        total_bytes = sum(entry["total"] for entry in sorted_entries)
+        type_label = self._cleanup_type.currentText() if hasattr(self, "_cleanup_type") else "All"
+        self._cleanup_summary.setText(
+            f"{len(sorted_entries)} cleanup mods, {total_files} losing files, "
+            f"{self._format_size(total_bytes)} shown, type: {type_label}."
+        )
+
+        self._cleanup_tree.setUpdatesEnabled(False)
+        try:
+            self._cleanup_tree.clear()
+            for entry in sorted_entries:
+                rows = sorted(entry["rows"], key=lambda row: (-row[1], row[0]))
+                parent = QTreeWidgetItem(
+                    [
+                        f"{entry['display']} ({len(rows)} files)",
+                        self._format_size(entry["total"]),
+                        "",
+                        "",
+                        "",
+                        "",
+                    ]
+                )
+                parent.setToolTip(0, self._cleanup_rule_text())
+                parent.setExpanded(True)
+                self._cleanup_tree.addTopLevelItem(parent)
+                for path, size, kind, archive_name, overwritten_count, winner, chain in rows:
+                    child = QTreeWidgetItem(
+                        [
+                            path,
+                            self._format_size(size),
+                            kind,
+                            archive_name,
+                            str(overwritten_count),
+                            winner,
+                        ]
+                    )
+                    child.setToolTip(0, chain)
+                    child.setToolTip(5, chain)
+                    parent.addChild(child)
+        finally:
+            self._cleanup_dirty = False
+            self._cleanup_tree.setUpdatesEnabled(True)
+
+    @staticmethod
+    def _cleanup_provider_matches_mod_filter(provider: Provider, mod_filter: str) -> bool:
+        if not mod_filter:
+            return True
+        searchable = " ".join(
+            [
+                provider.display_mod_name,
+                provider.mod_name,
+                provider.archive_name,
+                provider.real_archive_path,
+            ]
+        ).lower()
+        return mod_filter in searchable
+
+    def _sorted_cleanup_entries(self, entries: List[dict]) -> List[dict]:
+        sort_mode = (
+            self._cleanup_sort.currentData()
+            if hasattr(self, "_cleanup_sort")
+            else "cleanup"
+        )
+        if sort_mode == "alphabetic":
+            return sorted(entries, key=lambda entry: entry["display"].lower())
+        if sort_mode == "files":
+            return sorted(
+                entries,
+                key=lambda entry: (-len(entry["rows"]), entry["display"].lower()),
+            )
+        return sorted(
+            entries,
+            key=lambda entry: (-entry["total"], entry["display"].lower()),
+        )
+
     def _populate_mod_details(
         self, summary: Optional[ModArchiveSummary], archive: Optional[ArchiveListing]
     ) -> None:
@@ -544,6 +784,11 @@ class BsaConflictDialog(QDialog):
             self._set_table_rows(self._winning_table, [])
             self._set_table_rows(self._losing_table, [])
             self._set_table_rows(self._no_conflict_table, [])
+            self._space_summary.setText(
+                "Potential cleanup: 0 B selected, "
+                f"{self._format_size(self._hidden_reclaimable_bytes)} not shown, "
+                f"{self._format_size(self._total_reclaimable_bytes)} total."
+            )
             self._winning_header.setText("Winning file conflicts: 0")
             self._losing_header.setText("Losing file conflicts: 0")
             self._no_conflict_header.setText("Files without conflicts: 0")
@@ -600,9 +845,81 @@ class BsaConflictDialog(QDialog):
         self._no_conflict_header.setText(
             f"Files without conflicts: {len(no_conflict_rows)}"
         )
+        if archive is None:
+            selected_reclaimable = self._reclaimable_by_mod.get(summary.mod_name, 0)
+            selection_label = "selected"
+        else:
+            selected_reclaimable = self._reclaimable_bytes_for_archive(
+                archive, enabled_categories, file_filter
+            )
+            selection_label = "selected BSA"
+        self._space_summary.setText(
+            "Cleanup from losing files if only winners are kept: "
+            f"{self._format_size(selected_reclaimable)} {selection_label}, "
+            f"{self._format_size(self._visible_reclaimable_bytes)} shown, "
+            f"{self._format_size(self._hidden_reclaimable_bytes)} not shown, "
+            f"{self._format_size(self._total_reclaimable_bytes)} total."
+        )
         self._set_table_rows(self._winning_table, winning_rows)
         self._set_table_rows(self._losing_table, losing_rows)
         self._set_table_rows(self._no_conflict_table, no_conflict_rows)
+
+    def _reclaimable_bytes_by_mod(
+        self, enabled_categories: set[str], file_filter: str
+    ) -> Dict[str, int]:
+        totals: Dict[str, int] = {}
+        for conflict in self._conflicts:
+            if category_for_path(conflict.path) not in enabled_categories:
+                continue
+            if file_filter and file_filter not in conflict.path.lower():
+                continue
+            for provider in conflict.chain[:-1]:
+                if provider.size <= 0:
+                    continue
+                totals[provider.mod_name] = totals.get(provider.mod_name, 0) + provider.size
+        return totals
+
+    def _total_cleanup_bytes(self) -> int:
+        total = 0
+        for conflict in self._conflicts:
+            for provider in conflict.chain[:-1]:
+                if provider.size > 0:
+                    total += provider.size
+        return total
+
+    @staticmethod
+    def _cleanup_rule_text() -> str:
+        return (
+            "Cleanup counts every losing provider before the winner in a conflict chain. "
+            "Example: bsa1 -> bsa2 -> loose(win) counts bsa1 + bsa2. "
+            "Example: loose1 -> bsa1 -> bsa2 -> loose2(win) counts loose1 + bsa1 + bsa2. "
+            "Archive files use indexed entry sizes; loose files use their real file sizes on disk."
+        )
+
+    def _reclaimable_bytes_for_archive(
+        self,
+        archive: ArchiveListing,
+        enabled_categories: set[str],
+        file_filter: str,
+    ) -> int:
+        archive_files = set(archive.files)
+        total = 0
+        for conflict in self._conflicts:
+            if conflict.path not in archive_files:
+                continue
+            if category_for_path(conflict.path) not in enabled_categories:
+                continue
+            if file_filter and file_filter not in conflict.path.lower():
+                continue
+            for provider in conflict.chain[:-1]:
+                if (
+                    provider.kind == "archive"
+                    and provider.mod_name == archive.mod_name
+                    and provider.archive_name == archive.archive_name
+                    and provider.size > 0
+                ):
+                    total += provider.size
+        return total
 
     @staticmethod
     def _format_size(size: int) -> str:
@@ -643,13 +960,8 @@ class BsaConflictDialog(QDialog):
         return field.text().strip().lower()
 
     def export_csv(self) -> None:
-        summary, archive = self._selected_scope()
-        if summary is None:
-            QMessageBox.information(self, "Export CSV", "Select a mod first.")
-            return
-
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Selected Mod Conflicts", "", "CSV files (*.csv)"
+            self, "Export Cleanup Candidates", "", "CSV files (*.csv)"
         )
         if not filename:
             return
@@ -657,14 +969,18 @@ class BsaConflictDialog(QDialog):
         try:
             with open(filename, "w", newline="", encoding="utf-8-sig") as handle:
                 writer = csv.writer(handle)
-                selection_name = summary.display_mod_name
-                if archive is not None:
-                    selection_name = f"{summary.display_mod_name} :: {archive.archive_name}"
-                writer.writerow([selection_name])
-                writer.writerow([])
-                self._write_table_to_csv(writer, "winning_file_conflicts", self._winning_table)
-                self._write_table_to_csv(writer, "losing_file_conflicts", self._losing_table)
-                self._write_table_to_csv(writer, "files_without_conflicts", self._no_conflict_table)
+                writer.writerow(["mod_or_file", "size", "type", "source", "overwritten", "winner"])
+                for index in range(self._cleanup_tree.topLevelItemCount()):
+                    parent = self._cleanup_tree.topLevelItem(index)
+                    writer.writerow([parent.text(0), parent.text(1), "", "", "", ""])
+                    for child_index in range(parent.childCount()):
+                        child = parent.child(child_index)
+                        writer.writerow(
+                            [
+                                child.text(column)
+                                for column in range(self._cleanup_tree.columnCount())
+                            ]
+                        )
         except OSError as error:
             QMessageBox.warning(self, "Export CSV", f"Could not write CSV:\n{error}")
 
@@ -688,6 +1004,13 @@ class BsaConflictDialog(QDialog):
         writer.writerow([])
 
     def copy_selected_chain(self) -> None:
+        if QApplication.focusWidget() is self._cleanup_tree:
+            item = self._cleanup_tree.currentItem()
+            if item is not None:
+                tooltip = item.toolTip(0) or item.toolTip(5) or item.text(0)
+                QApplication.clipboard().setText(tooltip)
+            return
+
         table = self._selected_detail_table()
         if table is None:
             return
@@ -721,10 +1044,10 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         return True
 
     def name(self) -> str:
-        return "BSA Conflict Viewer"
+        return "CleanUp"
 
     def localizedName(self) -> str:
-        return self._tr("BSA Conflict Viewer")
+        return self._tr("CleanUp")
 
     def displayName(self) -> str:
         return self.localizedName()
@@ -733,7 +1056,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         return "MO2 community"
 
     def description(self) -> str:
-        return self._tr("Shows archive and loose-file overwrite chains without extraction.")
+        return self._tr("Shows cleanup candidates from losing loose files and archive entries.")
 
     def version(self) -> mobase.VersionInfo:
         return mobase.VersionInfo(0, 1, 0, mobase.ReleaseType.PREALPHA)
@@ -756,7 +1079,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         ]
 
     def tooltip(self) -> str:
-        return self._tr("Scan active BSA/BA2 contents and show full overwrite chains.")
+        return self._tr("Scan active files and group cleanup candidates by mod.")
 
     def icon(self) -> QIcon:
         return QIcon()
