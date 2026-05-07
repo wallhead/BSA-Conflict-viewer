@@ -1,4 +1,7 @@
 bsa_conflict_viewer/__pycache__/
+CleanUp/
+BSA_Browser/
+experiments/
 **/__pycache__/
 *.pyc
 *.pyo
@@ -11,4 +14,3 @@ modorganizer-bsa_extractor/
 modorganizer-bsatk/
 modorganizer-python_plugins/
 modorganizer-uibase/
-
