@@ -54,7 +54,7 @@ Copy-Item -Recurse -Force ".\bsa_conflict_viewer" "D:\TES VV\MO2\plugins\bsa_con
 
 ## Notes
 
-- Version 1.1.0 is the current BCV plugin version.
+- Version 1.3.0 is the current BCV plugin version.
 - Large mod lists can take time to scan, especially when loose-file scanning walks
   many enabled mod folders.
 - Archive entries use indexed archive paths and sizes; archives are not unpacked.

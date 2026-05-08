@@ -781,7 +781,7 @@ class BsaConflictViewerPlugin(mobase.IPluginTool):
         return self._tr("Shows archive and loose-file overwrite chains without extraction.")
 
     def version(self) -> mobase.VersionInfo:
-        return mobase.VersionInfo(1, 1, 0, mobase.ReleaseType.FINAL)
+        return mobase.VersionInfo(1, 3, 0, mobase.ReleaseType.FINAL)
 
     def isActive(self) -> bool:
         return True
